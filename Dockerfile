@@ -1,34 +1,49 @@
-FROM spritsail/alpine:3.7
+ARG ALPINE_VER=3.7
 
-WORKDIR /var/www
+FROM spritsail/alpine:${ALPINE_VER}
 
+ARG ALPINE_VER
 ARG PTERODACTYL_PANEL_VER=0.7.7
-ARG COMPOSER_VER=1.6.5
+
+ENV SUID=www-data SGID=www-data
+ENV DATA_DIR=/pterodactyl
+ENV PTR_DIR=/var/www
+
+WORKDIR ${PTR_DIR}
+
+# Use php.earth alpine repository for php 7.2 packages
+ADD https://repos.php.earth/alpine/phpearth.rsa.pub /etc/apk/keys/phpearth.rsa.pub
+
+RUN apk --no-cache add --repository http://repos.php.earth/alpine/v${ALPINE_VER}/ \
+        php7.2-fpm php7.2-gd php7.2-pdo_mysql \
+        php7.2-bcmath php7.2-simplexml php7.2-curl php7.2-zip \
+        php7.2-pdo php7.2-mbstring php7.2-tokenizer \
+        php7.2-openssl php7.2-phar php7.2-json \
+        composer \
+        git curl \
+    \
+ && ln -sfv /etc/php/7.2 /etc/php7 \
+    \
+    # Fetch pterodactyl panel and organise some files/directories
+ && curl -fsSL "https://github.com/Pterodactyl/Panel/releases/download/v${PTERODACTYL_PANEL_VER}/panel.tar.gz" \
+      | tar xz --strip-components=1 \
+ && find \( -name ".gitkeep" -o -name ".githold" -o -name ".gitignore" \) -delete \
+ && find storage bootstrap -type d -print0 | xargs -0 -r chmod 755 \
+ && find bootstrap/cache -type f -print0 | xargs -0 -r chmod 755 \
+    \
+    # Install PHP dependencies and libraries
+ && composer install --ansi --no-dev --no-scripts --working-dir="${PTR_DIR}" \
+    \
+    # Add artisan cron schedule to run every minute
+ && echo "* * * * * su-exec --env php ${PTR_DIR}/artisan schedule:run >> /dev/null 2>&1" | crontab -u ${SUID} - \
+    \
+ && chown -R "$SUID:$SGID" ${PTR_DIR} /var/log/php \
+# && chmod 755 /usr/local/bin/pterodactyl-start \
+ && :
 
 ADD pterodactyl-start /usr/local/bin
+ADD php-fpm.conf /etc/php/7.2
 
-RUN apk --no-cache add \
-        php7-fpm php7-gd php7-pdo_mysql \
-        php7-bcmath php7-simplexml php7-curl php7-zip \
-        php7-pdo php7-mbstring php7-tokenizer \
-        php7-openssl php7-phar php7-json \
-        git curl \
-\
- # This is a temporary hack. composer should be installed from the repos in alpine:3.8
- && curl -fsSL -o /usr/bin/composer "https://getcomposer.org/download/${COMPOSER_VER}/composer.phar" \
- && chmod 755 /usr/bin/composer \
- && curl -fsSL "https://github.com/Pterodactyl/Panel/releases/download/v${PTERODACTYL_PANEL_VER}/panel.tar.gz" \
-      | tar xz --strip-components=1 -C /var/www \
- && chmod -R 755 /var/www/storage/* /var/www/bootstrap/cache \
- && composer install --ansi --no-dev --no-scripts --working-dir=/var/www/ \
- # Do we actually need these?
- #&& mkdir -p /var/www/storage/app/public \
- #&& mkdir -p /var/www/storage/framework/cache \
- #&& mkdir -p /var/www/storage/framework/sessions \
- #&& mkdir -p /var/www/storage/framework/views \
- #&& mkdir -p /var/www/storage/logs \
- #&& mkdir -p /var/www/bootstrap/cache \
- && chown -R www-data:www-data /var/www \
- && chmod 755 /usr/local/bin/pterodactyl-start
+VOLUME ${DATA_DIR}
 
-RUN ["/usr/local/bin/pterodactyl-start"]
+CMD ["/usr/local/bin/pterodactyl-start"]

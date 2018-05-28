@@ -1,0 +1,80 @@
+#!/bin/sh
+set -e
+
+MEM_LIMIT="${CORE_MEMORY_LIMIT:=128M}" 
+ENV_FILE="${PTR_DIR}/.env"
+
+printmsg() { printf "\n\e[1m[*]\e[0m %s...\n" "$@"; }
+artisan() { su-exec --env php -d memory_limit="${MEM_LIMIT}" -f "${PTR_DIR}/artisan" "$@"; }
+
+
+# Generate the .env configuration file
+# Use default unless it is set in the environment
+while read def; do
+    varname="$(echo "$def" | sed 's/=.*//g')"
+    test "$varname" = "APP_KEY" && continue
+    if newvalue=$(printenv "$varname"); then
+        echo "$varname=$newvalue"
+    else
+        echo "$def"
+    fi
+done < "${ENV_FILE}.example" > "${ENV_FILE}"
+
+# Wait for the database server to come up
+# inspiration: https://github.com/DreamItGetIT/wait-for-mysql/blob/master/wait.sh
+printmsg "Waiting for database"
+until sh -ac "source \"${ENV_FILE}\"; nc -w1 \"$DB_HOST\" \"$DB_PORT\" -e true" 2>&1 >/dev/null; do
+    printf "."
+    sleep 1
+done
+printf "\n"
+
+# Generate an app key on first boot
+if [ ! -f "${DATA_DIR}/app.key" ]; then
+
+    cp "${ENV_FILE}.example" "${ENV_FILE}"
+
+    # echo "APP_KEY=" > "${ENV_FILE}"
+    chown "$SUID:$SGID" "${ENV_FILE}"
+
+    printmsg "Generating application encryption key"
+    artisan key:generate --force -n
+
+    # Parse the generated APP_KEY as binary data
+    grep "APP_KEY=" "${ENV_FILE}" \
+        | sed 's/.*base64://g' \
+        | base64 -d \
+        > "${DATA_DIR}/app.key"
+ 
+    # TODO: Add a user
+
+else
+    # Load the app key from file and add it to the env
+    echo "APP_KEY=base64:$(base64 < "${DATA_DIR}/app.key")" >> "${ENV_FILE}"
+fi
+
+# Clear config cache and optimize on every startup
+printmsg "Cleaning"
+artisan cache:clear -q
+artisan config:clear -q
+artisan view:clear -q
+artisan route:clear -q
+artisan config:cache -q
+
+# Always update the database in case of update
+printmsg "Updating database"
+artisan migrate --force
+
+# Always update the database in case of update
+printmsg "Seeding database"
+artisan db:seed --force
+
+# Start crond for artisan scheduled tasks
+crond -b -d 6
+
+# Start worker queue
+# started in a subshell so it is disowned and re-parented when sh exits
+(artisan queue:work database --queue=high,standard,low --sleep=3 --tries=3 &)
+
+# Start php-fpm
+exec php-fpm
